@@ -28,6 +28,89 @@ pub struct MemoryPlan {
     pub module_counts: BTreeMap<TensorModule, usize>,
 }
 
+/// Parameter estimates derived from config geometry, in BF16-equivalent units.
+///
+/// These are analytic estimates from hidden_size / intermediate_size / vocab_size
+/// and standard Qwen layer shapes. They do NOT come from per-tensor shapes
+/// (the safetensors index carries none), so they are labelled as estimates.
+#[derive(Debug, Clone)]
+pub struct ModuleParamEstimate {
+    pub label: &'static str,
+    /// Estimated parameter count at BF16 storage.
+    pub params: f64,
+}
+
+/// Estimate language-model parameter groups from config geometry.
+pub fn module_param_estimates(config: &ModelConfig) -> Vec<ModuleParamEstimate> {
+    let h = config.hidden_size as f64;
+    let i = config.intermediate_size as f64;
+    let v = config.vocab_size as f64;
+    let f = config.full_attention_layers as f64;
+    let l = config.linear_attention_layers as f64;
+    let nh = config.num_attention_heads as f64;
+    let nkv = config.num_key_value_heads as f64;
+    let hd = config.head_dim as f64;
+
+    let mut out = Vec::new();
+
+    // Embedding + untied LM head: both project vocab <-> hidden.
+    let embed_params = v * h;
+    out.push(ModuleParamEstimate {
+        label: "embedding",
+        params: embed_params,
+    });
+    if !config.tie_word_embeddings {
+        out.push(ModuleParamEstimate {
+            label: "lm_head",
+            params: v * h,
+        });
+    }
+
+    // Full attention per layer: Q proj (h×nh·hd) + K/V (h×nkv·hd, gated Qwen3.5
+    // doubles K via attn_output_gate but gate shares the K/V projection shape
+    // only on Q side; keep the standard QKVO accounting) + O proj.
+    let q = h * nh * hd;
+    let kv = 2.0 * h * nkv * hd;
+    let o = nh * hd * h;
+    let full_attn_per_layer = q + kv + o;
+    out.push(ModuleParamEstimate {
+        label: "full_attention",
+        params: full_attn_per_layer * f,
+    });
+
+    // Linear attention layers: keep a conservative placeholder from observed
+    // tensor counts (12 tensors/layer) — exact per-tensor shapes are not in the
+    // index, so these bytes stay inside the residual rather than being guessed.
+    let linear_tensors: f64 = l;
+    let _ = linear_tensors;
+
+    // MLP per layer (SwiGLU: gate + up + down).
+    let mlp_per_layer = 3.0 * h * i;
+    out.push(ModuleParamEstimate {
+        label: "mlp",
+        params: mlp_per_layer * config.num_layers as f64,
+    });
+
+    // LayerNorms: RMSNorm is parameter-light (~2h per layer + final norm).
+    let norm_params = (2.0 * config.num_layers as f64 + 1.0) * h;
+    out.push(ModuleParamEstimate {
+        label: "layernorm",
+        params: norm_params,
+    });
+
+    out
+}
+
+/// Residual bytes: whatever the geometry-based estimates do not explain
+/// (linear-attention internals, vision tower, MTP, embeddings rounding).
+pub fn residual_bytes(config: &ModelConfig, index: &SafetensorsIndex) -> f64 {
+    let explained: f64 = module_param_estimates(config)
+        .iter()
+        .map(|m| m.params)
+        .sum();
+    (index.total_size as f64 / 2.0 - explained).max(0.0)
+}
+
 pub struct KvEstimate {
     pub context_tokens: i64,
     /// Bytes per token per full-attention layer: 2 (K+V) * kv_heads * head_dim * 2 (bf16)
@@ -36,11 +119,7 @@ pub struct KvEstimate {
     pub total_bytes: f64,
 }
 
-pub fn build_plan(
-    _config: &ModelConfig,
-    index: &SafetensorsIndex,
-    precisions: &[Precision],
-) -> MemoryPlan {
+pub fn build_plan(index: &SafetensorsIndex, precisions: &[Precision]) -> MemoryPlan {
     // The checkpoint is stored in BF16 (config dtype bfloat16), so total_size
     // corresponds to 2 bytes per parameter. This is an anchor, not a truth claim:
     // the index has no per-tensor dtype, so all precision numbers are estimates.
@@ -111,7 +190,7 @@ mod tests {
             weight_map: Default::default(),
             total_size: 100,
         };
-        let plan = build_plan(&cfg, &idx, &[Precision::Bf16]);
+        let plan = build_plan(&idx, &[Precision::Bf16]);
         let kv = plan.kv_estimate(&cfg, 4096);
         // 2 * 4 * 256 * 2 = 4096 bytes/token/layer, 1 full layer, 4096 tokens
         assert_eq!(kv.bytes_per_token_per_layer, 4096.0);
@@ -125,9 +204,24 @@ mod tests {
             weight_map: Default::default(),
             total_size: 2_000_000,
         };
-        let plan = build_plan(&cfg, &idx, &[Precision::Bf16, Precision::Int4]);
+        let plan = build_plan(&idx, &[Precision::Bf16, Precision::Int4]);
         assert_eq!(plan.implied_params, 1_000_000.0);
         assert_eq!(plan.estimates[0].total_bytes, 2_000_000.0);
         assert_eq!(plan.estimates[1].total_bytes, 500_000.0);
+    }
+
+    #[test]
+    fn module_estimates_are_positive_and_sum_below_total() {
+        let cfg = config();
+        let idx = SafetensorsIndex {
+            weight_map: Default::default(),
+            total_size: 400_000_000_000,
+        };
+        let estimates = module_param_estimates(&cfg);
+        assert!(!estimates.is_empty());
+        assert!(estimates.iter().all(|m| m.params > 0.0));
+        let explained: f64 = estimates.iter().map(|m| m.params).sum();
+        assert!(explained < idx.total_size as f64 / 2.0);
+        assert!(residual_bytes(&cfg, &idx) > 0.0);
     }
 }

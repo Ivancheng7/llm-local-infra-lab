@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use std::path::Path;
 
@@ -68,8 +68,8 @@ pub enum LayerKind {
 
 impl ModelConfig {
     pub fn from_file(path: &Path) -> Result<Self> {
-        let raw = std::fs::read_to_string(path)
-            .with_context(|| format!("reading {}", path.display()))?;
+        let raw =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         Self::from_str(&raw)
     }
 

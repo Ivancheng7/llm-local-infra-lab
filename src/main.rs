@@ -17,7 +17,10 @@ pub enum Precision {
 }
 
 #[derive(Parser)]
-#[command(name = "llm-local-infra-lab", about = "Local LLM metadata analyzer and memory planner")]
+#[command(
+    name = "llm-local-infra-lab",
+    about = "Local LLM metadata analyzer and memory planner"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -46,6 +49,9 @@ enum Command {
         /// Output format
         #[arg(long, value_enum, default_value = "markdown")]
         format: OutputFormat,
+        /// Write the report to this file instead of stdout
+        #[arg(long)]
+        output: Option<PathBuf>,
     },
 }
 
@@ -61,17 +67,18 @@ fn main() -> Result<()> {
         Command::InspectConfig { path } => {
             let config = model_config::ModelConfig::from_file(&path)
                 .with_context(|| format!("reading config {}", path.display()))?;
-            report::print_config(&config);
+            print!("{}", report::render_config(&config));
         }
         Command::InspectIndex { path } => {
             let index = safetensors_index::SafetensorsIndex::from_file(&path)
                 .with_context(|| format!("reading index {}", path.display()))?;
-            report::print_index(&index);
+            print!("{}", report::render_index(&index));
         }
         Command::Plan {
             metadata,
             precision,
             format,
+            output,
         } => {
             let config = model_config::ModelConfig::from_file(&metadata.join("config.json"))
                 .with_context(|| format!("reading config in {}", metadata.display()))?;
@@ -80,10 +87,22 @@ fn main() -> Result<()> {
             )
             .with_context(|| format!("reading index in {}", metadata.display()))?;
             let precisions = parse_precisions(&precision)?;
-            let plan = memory_planner::build_plan(&config, &index, &precisions);
-            match format {
-                OutputFormat::Json => report::print_plan_json(&config, &index, &plan)?,
-                OutputFormat::Markdown => report::print_plan_markdown(&config, &index, &plan),
+            let plan = memory_planner::build_plan(&index, &precisions);
+            let rendered = match format {
+                OutputFormat::Json => report::render_plan_json(&config, &index, &plan)?,
+                OutputFormat::Markdown => report::render_plan_markdown(&config, &index, &plan),
+            };
+            match output {
+                Some(path) => {
+                    if let Some(parent) = path.parent() {
+                        std::fs::create_dir_all(parent)
+                            .with_context(|| format!("creating {}", parent.display()))?;
+                    }
+                    std::fs::write(&path, &rendered)
+                        .with_context(|| format!("writing {}", path.display()))?;
+                    eprintln!("report written to {}", path.display());
+                }
+                None => print!("{}", rendered),
             }
         }
     }

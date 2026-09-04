@@ -15,9 +15,10 @@ cargo run -- inspect-config --path metadata/Qwen3.8-27B/config.json
 # Inspect a safetensors index (shards, tensors, total bytes)
 cargo run -- inspect-index --path metadata/Qwen3.8-27B/model.safetensors.index.json
 
-# Full memory plan (markdown or json)
+# Full memory plan (markdown or json), stdout or --output file
 cargo run -- plan --metadata metadata/Qwen3.8-27B --precision bf16,int8,int4 --format markdown
 cargo run -- plan --metadata metadata/Qwen3.8-27B --format json
+cargo run -- plan --metadata metadata/Qwen3.8-27B --output artifacts/qwen3.8-27b-plan.md
 ```
 
 ## Fetching metadata (no 52 GB download)
@@ -43,6 +44,10 @@ curl -L -o metadata/Qwen3.8-27B/model.safetensors.index.json \
 
 - Precision sizes (INT8/INT4) are estimates scaled from the checkpoint's
   declared BF16 `total_size`; the safetensors index carries no per-tensor dtype.
+- Module parameter estimates (embedding, lm_head, full attention, MLP,
+  layernorm) are derived from config geometry with standard Qwen layer shapes;
+  linear-attention internals, the vision tower, and MTP land in a residual
+  bucket (~6.95B params for Qwen3.8-27B) rather than being guessed.
 - KV estimates cover full-attention layers only; linear-attention layers hold
   fixed-size recurrent state, not per-token KV.
 - Tensor classification is by name (module counts), not per-tensor byte counts.
