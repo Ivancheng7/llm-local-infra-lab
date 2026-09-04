@@ -1,0 +1,12 @@
+target
+models
+cache
+artifacts
+*.safetensors
+*.gguf
+*.bin
+
+
+# Added by cargo
+
+/target
