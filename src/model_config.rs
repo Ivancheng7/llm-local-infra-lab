@@ -35,6 +35,47 @@ struct RawText {
     tie_word_embeddings: Option<bool>,
     #[serde(default)]
     dtype: Option<String>,
+    // Linear-attention (gated delta net) geometry
+    #[serde(default)]
+    linear_num_key_heads: Option<i64>,
+    #[serde(default)]
+    linear_num_value_heads: Option<i64>,
+    #[serde(default)]
+    linear_key_head_dim: Option<i64>,
+    #[serde(default)]
+    linear_value_head_dim: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct VisionConfig {
+    pub depth: i64,
+    pub hidden_size: i64,
+    pub intermediate_size: i64,
+    pub out_hidden_size: i64,
+    pub num_position_embeddings: i64,
+    pub patch_size: i64,
+    pub spatial_merge_size: i64,
+    pub in_channels: i64,
+    pub temporal_patch_size: i64,
+}
+
+#[derive(Deserialize)]
+struct RawVision {
+    depth: i64,
+    hidden_size: i64,
+    intermediate_size: i64,
+    #[serde(default)]
+    out_hidden_size: Option<i64>,
+    #[serde(default)]
+    num_position_embeddings: i64,
+    #[serde(default)]
+    patch_size: i64,
+    #[serde(default)]
+    spatial_merge_size: i64,
+    #[serde(default)]
+    in_channels: i64,
+    #[serde(default)]
+    temporal_patch_size: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -57,6 +98,17 @@ pub struct ModelConfig {
     pub tie_word_embeddings: bool,
     pub declared_dtype: String,
     pub has_vision: bool,
+    /// Linear-attention head geometry (None when the model has no linear layers).
+    pub linear: Option<LinearGeometry>,
+    pub vision: Option<VisionConfig>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct LinearGeometry {
+    pub num_key_heads: i64,
+    pub num_value_heads: i64,
+    pub key_head_dim: i64,
+    pub value_head_dim: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,6 +171,40 @@ impl ModelConfig {
             tie_word_embeddings: t.tie_word_embeddings.unwrap_or(false),
             declared_dtype: t.dtype.unwrap_or_else(|| "unknown".into()),
             has_vision: raw.vision_config.is_some(),
+            linear: if t.linear_num_key_heads.is_some() {
+                Some(LinearGeometry {
+                    num_key_heads: t.linear_num_key_heads.unwrap_or(0),
+                    num_value_heads: t.linear_num_value_heads.unwrap_or(0),
+                    key_head_dim: t.linear_key_head_dim.unwrap_or(0),
+                    value_head_dim: t.linear_value_head_dim.unwrap_or(0),
+                })
+            } else {
+                None
+            },
+            vision: raw.vision_config.map(|v| {
+                let v: RawVision = serde_json::from_value(v).unwrap_or(RawVision {
+                    depth: 0,
+                    hidden_size: 0,
+                    intermediate_size: 0,
+                    out_hidden_size: None,
+                    num_position_embeddings: 0,
+                    patch_size: 0,
+                    spatial_merge_size: 0,
+                    in_channels: 0,
+                    temporal_patch_size: 0,
+                });
+                VisionConfig {
+                    depth: v.depth,
+                    hidden_size: v.hidden_size,
+                    intermediate_size: v.intermediate_size,
+                    out_hidden_size: v.out_hidden_size.unwrap_or(v.hidden_size),
+                    num_position_embeddings: v.num_position_embeddings,
+                    patch_size: v.patch_size,
+                    spatial_merge_size: v.spatial_merge_size,
+                    in_channels: v.in_channels,
+                    temporal_patch_size: v.temporal_patch_size,
+                }
+            }),
         })
     }
 }

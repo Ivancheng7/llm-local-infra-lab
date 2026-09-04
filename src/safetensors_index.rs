@@ -38,7 +38,11 @@ impl SafetensorsIndex {
     pub fn from_file(path: &Path) -> Result<Self> {
         let raw =
             std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        let raw: RawIndex = serde_json::from_str(&raw)?;
+        Self::from_str(&raw)
+    }
+
+    pub fn from_str(raw: &str) -> Result<Self> {
+        let raw: RawIndex = serde_json::from_str(raw)?;
         let total_size = raw.metadata.map(|m| m.total_size_i64()).unwrap_or(0);
         if total_size <= 0 {
             anyhow::bail!("index metadata.total_size missing or non-positive");

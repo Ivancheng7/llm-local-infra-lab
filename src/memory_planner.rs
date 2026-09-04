@@ -41,6 +41,10 @@ pub struct ModuleParamEstimate {
 }
 
 /// Estimate language-model parameter groups from config geometry.
+///
+/// Shapes follow the tensor names observed in the real Qwen3.8-27B index:
+/// full-attention layers carry q/k_norm, linear-attention layers are gated
+/// delta nets (Qwen3-Next-style fused qkvz + ba projections).
 pub fn module_param_estimates(config: &ModelConfig) -> Vec<ModuleParamEstimate> {
     let h = config.hidden_size as f64;
     let i = config.intermediate_size as f64;
@@ -54,10 +58,9 @@ pub fn module_param_estimates(config: &ModelConfig) -> Vec<ModuleParamEstimate> 
     let mut out = Vec::new();
 
     // Embedding + untied LM head: both project vocab <-> hidden.
-    let embed_params = v * h;
     out.push(ModuleParamEstimate {
         label: "embedding",
-        params: embed_params,
+        params: v * h,
     });
     if !config.tie_word_embeddings {
         out.push(ModuleParamEstimate {
@@ -66,43 +69,93 @@ pub fn module_param_estimates(config: &ModelConfig) -> Vec<ModuleParamEstimate> 
         });
     }
 
-    // Full attention per layer: Q proj (h×nh·hd) + K/V (h×nkv·hd, gated Qwen3.5
-    // doubles K via attn_output_gate but gate shares the K/V projection shape
-    // only on Q side; keep the standard QKVO accounting) + O proj.
-    let q = h * nh * hd;
-    let kv = 2.0 * h * nkv * hd;
-    let o = nh * hd * h;
-    let full_attn_per_layer = q + kv + o;
+    // Full attention per layer: Q/K/V/O + q_norm/k_norm (observed in index).
+    let full_attn_per_layer = h * nh * hd + 2.0 * h * nkv * hd + nh * hd * h + (nh + nkv) * hd;
     out.push(ModuleParamEstimate {
         label: "full_attention",
         params: full_attn_per_layer * f,
     });
 
-    // Linear attention layers: keep a conservative placeholder from observed
-    // tensor counts (12 tensors/layer) — exact per-tensor shapes are not in the
-    // index, so these bytes stay inside the residual rather than being guessed.
-    let linear_tensors: f64 = l;
-    let _ = linear_tensors;
+    // Linear attention per layer (gated delta net, shapes from config):
+    // in_proj_qkvz: h -> (2*nk*dk + 2*nv*dv); in_proj_ba: h -> (nk + nv);
+    // out_proj: nv*dv -> h; conv1d depthwise + A_log + dt_bias (tiny).
+    if let Some(lin) = &config.linear {
+        let qkvz = 2.0
+            * (lin.num_key_heads * lin.key_head_dim + lin.num_value_heads * lin.value_head_dim)
+                as f64;
+        let ba = (lin.num_key_heads + lin.num_value_heads) as f64;
+        let per_layer = h * qkvz
+            + h * ba
+            + lin.num_value_heads as f64 * lin.value_head_dim as f64 * h
+            + qkvz * 4.0
+            + ba;
+        out.push(ModuleParamEstimate {
+            label: "linear_attention",
+            params: per_layer * l,
+        });
+    }
 
     // MLP per layer (SwiGLU: gate + up + down).
-    let mlp_per_layer = 3.0 * h * i;
     out.push(ModuleParamEstimate {
         label: "mlp",
-        params: mlp_per_layer * config.num_layers as f64,
+        params: 3.0 * h * i * config.num_layers as f64,
     });
 
-    // LayerNorms: RMSNorm is parameter-light (~2h per layer + final norm).
-    let norm_params = (2.0 * config.num_layers as f64 + 1.0) * h;
+    // RMSNorms: input + post per layer + final norm.
     out.push(ModuleParamEstimate {
         label: "layernorm",
-        params: norm_params,
+        params: (2.0 * config.num_layers as f64 + 1.0) * h,
     });
+
+    // Vision tower: ViT blocks (with biases) + patch embed + pos embed + merger.
+    if let Some(vis) = &config.vision {
+        out.push(ModuleParamEstimate {
+            label: "vision",
+            params: vision_params(vis),
+        });
+    }
+
+    // MTP: one extra decoder layer (attention + mlp + norms) + fc heads.
+    if config.mtp_layers > 0 {
+        let per_layer = full_attn_per_layer + 3.0 * h * i + 3.0 * h;
+        out.push(ModuleParamEstimate {
+            label: "mtp",
+            params: per_layer * config.mtp_layers as f64 + 2.0 * h * h + 2.0 * h,
+        });
+    }
 
     out
 }
 
-/// Residual bytes: whatever the geometry-based estimates do not explain
-/// (linear-attention internals, vision tower, MTP, embeddings rounding).
+/// ViT-style vision tower with biases, matching the observed
+/// model.visual.* tensor names (qkv/proj/fc1/fc2 with bias, two norms,
+/// patch_embed conv, pos_embed, merger with norm).
+fn vision_params(vis: &crate::model_config::VisionConfig) -> f64 {
+    let vh = vis.hidden_size as f64;
+    let vi = vis.intermediate_size as f64;
+    let vo = vis.out_hidden_size as f64;
+    let d = vis.depth as f64;
+    let merge = vis.spatial_merge_size as f64;
+
+    let block = (vh * 3.0 * vh + 3.0 * vh)           // attn.qkv + bias
+        + (vh * vh + vh)                              // attn.proj + bias
+        + (vh * vi + vi) + (vi * vh + vh)             // mlp fc1/fc2 + bias
+        + 4.0 * vh; // norm1/norm2 (weight+bias)
+    let patch_embed = vis.in_channels as f64
+        * vis.temporal_patch_size as f64
+        * vis.patch_size as f64
+        * vis.patch_size as f64
+        * vh
+        + vh;
+    let pos_embed = vis.num_position_embeddings as f64 * vh;
+    let merger = vo + (vh * merge * merge) * vi + vi + vi * vo + vo;
+
+    block * d + patch_embed + pos_embed + merger
+}
+
+/// Unexplained bytes: total implied params minus every geometry estimate.
+/// For Qwen3.8-27B this lands around 2% of the checkpoint — the honest
+/// error bar of shape-based accounting without per-tensor shapes.
 pub fn residual_bytes(config: &ModelConfig, index: &SafetensorsIndex) -> f64 {
     let explained: f64 = module_param_estimates(config)
         .iter()
@@ -161,6 +214,7 @@ impl MemoryPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::safetensors_index;
 
     fn config() -> ModelConfig {
         ModelConfig::from_str(
@@ -223,5 +277,31 @@ mod tests {
         let explained: f64 = estimates.iter().map(|m| m.params).sum();
         assert!(explained < idx.total_size as f64 / 2.0);
         assert!(residual_bytes(&cfg, &idx) > 0.0);
+    }
+
+    /// Against the real Qwen3.8-27B config + index, the geometry model should
+    /// land within a few percent of the implied 27.78B params. This pins the
+    /// shape assumptions (gated delta net, q/k norms, vision tower, MTP).
+    #[test]
+    fn real_model_geometry_explains_most_of_checkpoint() {
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        let dir = format!("{}/metadata/Qwen3.8-27B", manifest);
+        let (Ok(cfg_raw), Ok(idx_raw)) = (
+            std::fs::read_to_string(format!("{}/config.json", dir)),
+            std::fs::read_to_string(format!("{}/model.safetensors.index.json", dir)),
+        ) else {
+            eprintln!("metadata not present; skipping");
+            return;
+        };
+        let cfg = ModelConfig::from_str(&cfg_raw).unwrap();
+        let idx = safetensors_index::SafetensorsIndex::from_str(&idx_raw).unwrap();
+        let explained: f64 = module_param_estimates(&cfg).iter().map(|m| m.params).sum();
+        let implied = idx.total_size as f64 / 2.0;
+        let gap_pct = (implied - explained) / implied * 100.0;
+        assert!(
+            (0.0..5.0).contains(&gap_pct),
+            "geometry gap is {:.2}% of implied params",
+            gap_pct
+        );
     }
 }

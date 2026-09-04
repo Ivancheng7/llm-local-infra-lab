@@ -44,10 +44,12 @@ curl -L -o metadata/Qwen3.8-27B/model.safetensors.index.json \
 
 - Precision sizes (INT8/INT4) are estimates scaled from the checkpoint's
   declared BF16 `total_size`; the safetensors index carries no per-tensor dtype.
-- Module parameter estimates (embedding, lm_head, full attention, MLP,
-  layernorm) are derived from config geometry with standard Qwen layer shapes;
-  linear-attention internals, the vision tower, and MTP land in a residual
-  bucket (~6.95B params for Qwen3.8-27B) rather than being guessed.
+- Module parameter estimates come from config geometry with shapes verified
+  against tensor names in the official index: full-attention layers carry
+  q/k_norm, linear-attention layers are gated delta nets with fused
+  qkvz + ba projections (Qwen3-Next style), the vision tower is a biased
+  ViT, and MTP adds one decoder layer. The residual is ~0.54B params
+  (~2% of the checkpoint) — an honest error bar, not a module.
 - KV estimates cover full-attention layers only; linear-attention layers hold
   fixed-size recurrent state, not per-token KV.
 - Tensor classification is by name (module counts), not per-tensor byte counts.

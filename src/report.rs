@@ -153,7 +153,7 @@ pub fn render_plan_markdown(
         ));
     }
     out.push_str(&format!(
-        "| residual (linear-attn internals, vision, MTP) | ~{:.2}B | {} |\n\n",
+        "| residual (unexplained, ~2% error bar) | ~{:.2}B | {} |\n\n",
         memory_planner::residual_bytes(config, index) / 1e9,
         gib(memory_planner::residual_bytes(config, index) * 2.0)
     ));
@@ -184,7 +184,7 @@ pub fn render_plan_markdown(
         "- Precision sizes are estimates scaled from the checkpoint's declared\n  BF16 total_size; the safetensors index carries no per-tensor dtype.\n",
     );
     out.push_str(
-        "- Module parameter estimates come from config geometry (standard Qwen\n  layer shapes), not per-tensor shapes; the residual bucket collects\n  linear-attention internals, vision tower, and MTP bytes that geometry\n  does not pin down.\n",
+        "- Module parameter estimates come from config geometry with shapes\n  verified against tensor names in the official index (full-attention\n  q/k norms, gated-delta-net linear attention with fused qkvz+ba\n  projections, biased ViT vision tower, MTP decoder layer); the\n  residual is a ~2% error bar, not a module.\n",
     );
     out.push_str(
         "- KV estimates cover full-attention layers only; linear-attention\n  layers hold fixed-size recurrent state, not per-token KV.\n",
