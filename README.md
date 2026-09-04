@@ -59,7 +59,8 @@ curl -L -o metadata/Qwen3.8-27B/model.safetensors.index.json \
 - Phase 1 (current): metadata planner — config/index parsing, tensor
   classification, precision estimates, KV estimates, markdown/JSON reports.
 - Phase 2: local benchmark harness (TTFT/ITL/tok/s, VRAM, RSS, disk I/O)
-  on rented hourly GPU time.
+  on a 16 GB RTX 5060 Ti. Inference support matrix and field intel:
+  [docs/03-inference-support-matrix.md](docs/03-inference-support-matrix.md).
 - Phase 3: MoE expert-cache/offload analysis.
 
 ## Development
