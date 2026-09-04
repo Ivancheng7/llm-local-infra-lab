@@ -1,8 +1,12 @@
 # Handoff：llm-local-infra-lab 项目状态
 
-> 日期：2026-09-04 → 交给下一个会话
+> 最后更新：2026-09-04
 > 仓库：`C:\Users\27236\Desktop\llm-local-infra-lab`
 > 远端：https://github.com/Ivancheng7/llm-local-infra-lab（main 分支，CI 绿灯）
+>
+> 注：本文件是随 git 走的项目级 handoff。工作区还有多线程 handoff 体系
+> （`C:\Users\27236\handoffs\`，含 INDEX.md 总览和各主题线程文件），
+> 两者内容保持同步；恢复本主题前读其一即可。
 
 ## 项目背景（一句话）
 
